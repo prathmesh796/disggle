@@ -18,9 +18,46 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-const client = rpc(DISCORD_CLIENT_ID);
+let client: any;
+let isDiscordConnected = false;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let lastActivity: any = null;
 
-let lastActivity = null;
+function createClient() {
+    const c: any = rpc(DISCORD_CLIENT_ID!);
+    c.on("connected", () => {
+        isDiscordConnected = true;
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+        console.log("Connected to Discord RPC.");
+        if (lastActivity) {
+            try {
+                c.updatePresence(makePresencePayload(lastActivity));
+            } catch (e) {
+                console.warn("Failed to replay presence after connect:", (e as Error).message);
+            }
+        }
+    });
+    c.on("error", (e: Error) => {
+        isDiscordConnected = false;
+        console.warn("Discord RPC not available:", e.message);
+        scheduleReconnect();
+    });
+    return c;
+}
+
+function scheduleReconnect() {
+    if (reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+        console.log("Attempting Discord RPC reconnect...");
+        reconnectTimer = null;
+        client = createClient();
+    }, 5000);
+}
+
+client = createClient();
 
 function makePresencePayload(activity: any) {
     // Map activity types to presence fields
@@ -28,7 +65,7 @@ function makePresencePayload(activity: any) {
         details: activity.title,
         state: `On Kaggle (${activity.type})`,
         startTimestamp: activity.startedAt || Date.now(),
-        largeImageKey: "kaggle_logo", // you must upload this asset in your Discord App
+        largeImageKey: "4844503", // you must upload this asset in your Discord App
         largeImageText: "Kaggle",
         smallImageKey: "coding", // optional - use an uploaded asset or remove
         smallImageText: "Working",
@@ -63,8 +100,8 @@ app.post("/activity", (req: Request, res: Response) => {
 
     try {
         client.updatePresence(payload);
-        console.log("Updated presence:", payload.details, payload.state);
-        (res as any).send({ ok: true });
+        console.log(`${isDiscordConnected ? "Updated" : "Queued"} presence:`, payload.details, payload.state);
+        (res as any).status(isDiscordConnected ? 200 : 202).send({ ok: true, connected: isDiscordConnected });
     } catch (err) {
         console.error("RPC update error:", err);
         (res as any).status(500).send({ error: "Failed to update presence" });
@@ -76,6 +113,9 @@ app.post("/clear", (req: Request, res: Response) => {
     try {
         client.disconnect();
         console.log("Cleared presence (disconnected).");
+        isDiscordConnected = false;
+        lastActivity = null;
+        scheduleReconnect();
         (res as any).send({ ok: true });
     } catch (err) {
         (res as any).status(500).send({ error: "Failed to clear presence" });
